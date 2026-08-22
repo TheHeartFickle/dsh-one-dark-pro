@@ -1,0 +1,6 @@
+# 主题插件：注册 One Dark Pro 配色，并接管外观设置为
+# 浅色 / 深色 / 跟随系统 / One Dark Pro 四宫格（复用自带 appearance 行 id 完成原位替换）。
+# 纯 client UI 插件，host 半边为空 apply；浏览器半边通过 package.json 的 dsh.client 声明进入启动图。
+- insert:
+    - id: one-dark-pro
+      name: '@the-heart-fickle/dsh-one-dark-pro'

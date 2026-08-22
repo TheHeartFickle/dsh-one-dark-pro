@@ -1,0 +1,16 @@
+{
+  "id": "dsh-one-dark-pro",
+  "version": "0.1.0",
+  "main": "./lib/index.js",
+  "description": "One Dark Pro 主题插件：为 DSH 添加 One Dark Pro 配色，并在外观设置里提供 浅色/深色/跟随系统/One Dark Pro 四宫格选择。",
+  "engines": {
+    "dsh": ">=0.0.1"
+  },
+  "contributes": {
+    "tools": [],
+    "skills": []
+  },
+  "client": {
+    "main": "./lib/client.js"
+  }
+}
