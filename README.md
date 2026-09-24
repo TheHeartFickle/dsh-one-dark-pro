@@ -38,11 +38,13 @@ pnpm install
 
 打开 **设置 → 常规 → 外观**，点选「One Dark Pro」应用；随时点 **浅色 / 深色 / 跟随系统** 切回。
 
-选中 One Dark Pro 后，该选择会持久化到 DSH host 的 `~/.dsh/settings.yaml` 的 `dsh-one-dark-pro.preference`，重启后保持。
+选中 One Dark Pro 后，该选择会持久化到当前 profile 的 patch（`cordis.patch.yml` 中本插件 entry 的 `config.preference`），重启后保持。从 dsh 0.1.6 及更早的 `settings.yaml` 迁移过来的旧选择，会在首次启动时自动导入。
+
+要求 dsh `0.1.7-rc.1` 或更高：0.1.7 起 settings 以 profile entry 为命名空间、以 profile patch 为存储，更早的 dsh 不再受支持。
 
 ## 说明
 
-- host 半边（`lib/index.js`）：注册 `dsh-one-dark-pro` settings 命名空间，并暴露 `/api/one-dark-pro/preference` 路由（DSH 的 settings RPC 只对白名单命名空间开放，第三方命名空间须走插件自有路由）。
+- host 半边（`lib/index.js`）：通过本插件 Loader row（settings 表单的命名空间）读写偏好，并暴露 `/api/one-dark-pro/preference` 路由供 client 读写（client 半边不依赖 settings RPC 的命名空间白名单）。
 - client 半边（`lib/client.js`）：注册 One Dark Pro 主题，并用 `priority: -1` shadow 自带的 `settings.general.item[appearance]` 行，渲染为 四宫格（固定尺寸、选中态用品牌色边框）。选中态来源 `theme.getTheme().preference`，并监听 `theme/change` 刷新。
 - One Dark Pro 图标取自官方 `icon.svg` 的原子几何：三条 3D 轨道带路径 + 实心原子核圆点（24px）。
 

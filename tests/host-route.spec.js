@@ -15,24 +15,39 @@
  *   settings service absent            → 503
  *   unknown endpoint                   → 404
  *   read() fallback when value invalid → 'system'
- *   read() fallback when ns unregistered → 'system'
+ *   read() fallback when the row is gone → 'system'
  *   empty body defaults to system      → 200 'system'
+ *   legacy settings.yaml import        → writes into the row once
  */
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { apply, inject } from '../lib/index.js'
+import { apply, inject, parseLegacyPreference } from '../lib/index.js'
+
+/** 本插件在 profile 里的 Loader entry id，也是 settings 表单的命名空间。 */
+const ENTRY_ID = 'one-dark-pro'
+/** 本插件的 npm 包名，与其 Loader row 声明的 name 一致。 */
+const PACKAGE_NAME = '@the-heart-fickle/dsh-one-dark-pro'
 
 /** A fabricated context the real `apply()` consumes. */
-function fakeCtx() {
+function fakeCtx({ home, rows } = {}) {
   const settingsCallback = { current: null }
   const route = { current: null }
   const disposers = []
   const settingsDisposers = []
+  const fiber = {}
   const effectOnSettings = (fn) => {
     const dispose = fn()
     if (typeof dispose === 'function') settingsDisposers.push(dispose)
     return dispose
   }
+  const entry = { options: { id: ENTRY_ID, name: PACKAGE_NAME }, fiber, disabled: false }
   const ctx = {
+    fiber,
+    logger: { info: vi.fn(), warn: vi.fn() },
+    loader: { entries: () => (rows === undefined ? [entry] : rows) },
+    ...(home === undefined ? {} : { profileContext: { home } }),
     inject(services, cb) {
       expect(services).toEqual(['settings'])
       settingsCallback.current = (env) => cb({ ...env, effect: effectOnSettings })
@@ -79,15 +94,13 @@ async function callHandler(handler, req, res) {
 }
 
 /** A stub settings service the captured inject callback writes to. */
-function settingsStub(initial, { missingNs = false } = {}) {
+function settingsStub(initial, { missingNs = false, user } = {}) {
   let preference = initial
   return {
-    register: vi.fn(),
-    describe: vi.fn(({ redactSecrets } = {}) => {
-      expect(redactSecrets).toBe(true)
-      // missingNs simulates an unregistered namespace (describe has no row).
+    describe: vi.fn(() => {
+      // missingNs simulates a row configEditor no longer exposes.
       if (missingNs) return []
-      return [{ ns: 'dsh-one-dark-pro', value: { preference } }]
+      return [{ ns: ENTRY_ID, value: { preference }, revision: 0, ...(user === undefined ? {} : { user }) }]
     }),
     update: vi.fn(async (_ns, patch) => {
       preference = patch.preference
@@ -102,16 +115,18 @@ describe('dsh-one-dark-pro host route', () => {
     expect(inject).toEqual(['webServer'])
   })
 
-  it('GET /preference returns the persisted preference', async () => {
+  it('GET /preference returns the persisted preference (redacted describe)', async () => {
     const { ctx, settingsCallback, route } = fakeCtx()
     apply(ctx)
-    settingsCallback.current({ settings: settingsStub('one-dark-pro') })
+    const settings = settingsStub('one-dark-pro')
+    settingsCallback.current({ settings })
 
     const res = fakeRes()
     await callHandler(route.current, fakeReq({ method: 'GET', url: '/api/one-dark-pro/preference' }), res)
 
     expect(res.status).toBe(200)
     expect(JSON.parse(res.body)).toEqual({ ok: true, preference: 'one-dark-pro' })
+    expect(settings.describe).toHaveBeenCalledWith({ redactSecrets: true })
   })
 
   it('POST /preference persists and returns the new value', async () => {
@@ -129,7 +144,7 @@ describe('dsh-one-dark-pro host route', () => {
 
     expect(res.status).toBe(200)
     expect(JSON.parse(res.body)).toEqual({ ok: true, preference: 'one-dark-pro' })
-    expect(settings.update).toHaveBeenCalledWith('dsh-one-dark-pro', { preference: 'one-dark-pro' })
+    expect(settings.update).toHaveBeenCalledWith(ENTRY_ID, { preference: 'one-dark-pro' })
   })
 
   it('POST with an invalid preference rejects with 400 and never persists', async () => {
@@ -220,10 +235,10 @@ describe('dsh-one-dark-pro host route', () => {
     expect(JSON.parse(res.body)).toEqual({ ok: true, preference: 'system' })
   })
 
-  it('read() falls back to system when the namespace is not registered', async () => {
+  it('read() falls back to system when the row is gone', async () => {
     const { ctx, settingsCallback, route } = fakeCtx()
     apply(ctx)
-    // describe() returns no row for this ns → info is undefined → 'system'.
+    // describe() returns no row for this entry → info is undefined → 'system'.
     settingsCallback.current({ settings: settingsStub('one-dark-pro', { missingNs: true }) })
 
     const res = fakeRes()
@@ -299,5 +314,65 @@ describe('dsh-one-dark-pro host route', () => {
 
     expect(res.status).toBe(503)
     expect(JSON.parse(res.body)).toEqual({ ok: false, error: 'settings-unavailable' })
+  })
+
+  it('returns 503 and warns when no loader row identifies this package', async () => {
+    const { ctx, settingsCallback, route } = fakeCtx({ rows: [] })
+    apply(ctx)
+    settingsCallback.current({ settings: settingsStub('system') })
+
+    const res = fakeRes()
+    await callHandler(route.current, fakeReq({ method: 'GET', url: '/api/one-dark-pro/preference' }), res)
+
+    expect(res.status).toBe(503)
+    expect(ctx.logger.warn).toHaveBeenCalled()
+  })
+
+  it('imports a legacy settings.yaml preference into the row once', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'one-dark-pro-'))
+    await writeFile(join(home, 'settings.yaml.imported'), 'dsh-one-dark-pro:\n  preference: one-dark-pro\n', 'utf8')
+    try {
+      const { ctx, settingsCallback } = fakeCtx({ home })
+      apply(ctx)
+      const settings = settingsStub('system', { user: {} })
+      settingsCallback.current({ settings })
+
+      await vi.waitFor(() => expect(settings.update).toHaveBeenCalledWith(ENTRY_ID, { preference: 'one-dark-pro' }))
+      expect(ctx.logger.info).toHaveBeenCalled()
+    } finally {
+      await rm(home, { recursive: true, force: true })
+    }
+  })
+
+  it('skips the legacy import when the row already has user values', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'one-dark-pro-'))
+    await writeFile(join(home, 'settings.yaml.imported'), 'dsh-one-dark-pro:\n  preference: one-dark-pro\n', 'utf8')
+    try {
+      const { ctx, settingsCallback } = fakeCtx({ home })
+      apply(ctx)
+      const settings = settingsStub('system', { user: { preference: 'system' } })
+      settingsCallback.current({ settings })
+
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(settings.update).not.toHaveBeenCalled()
+    } finally {
+      await rm(home, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('parseLegacyPreference', () => {
+  it('reads the preference of the plugin section', () => {
+    expect(parseLegacyPreference('dsh-one-dark-pro:\n  preference: one-dark-pro\n')).toBe('one-dark-pro')
+  })
+
+  it('ignores other sections and out-of-whitelist values', () => {
+    expect(parseLegacyPreference('other:\n  preference: one-dark-pro\n')).toBeUndefined()
+    expect(parseLegacyPreference('dsh-one-dark-pro:\n  preference: blue\n')).toBeUndefined()
+  })
+
+  it('does not read nested or differently indented keys', () => {
+    expect(parseLegacyPreference('dsh-one-dark-pro:\n  nested:\n    preference: one-dark-pro\n')).toBeUndefined()
+    expect(parseLegacyPreference('dsh-one-dark-pro:\n    preference: one-dark-pro\n')).toBeUndefined()
   })
 })
