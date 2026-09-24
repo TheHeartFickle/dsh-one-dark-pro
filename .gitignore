@@ -2,3 +2,4 @@ node_modules
 _extracted
 *.vsix
 dist
+pnpm-lock.yaml
